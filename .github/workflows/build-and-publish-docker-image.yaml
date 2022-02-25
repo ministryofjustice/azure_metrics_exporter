@@ -6,14 +6,14 @@ on:
     paths:
       - '**.go'
       - Dockerfile
-      - .github/workflows/ build-and-publish-docker-image.yaml
+      - .github/workflows/build-and-publish-docker-image.yaml
   pull_request:
     branches:
       - master
     paths:
       - '**.go'
       - Dockerfile
-      - .github/workflows/ build-and-publish-docker-image.yaml
+      - .github/workflows/build-and-publish-docker-image.yaml
   workflow_dispatch:
 
 env:
