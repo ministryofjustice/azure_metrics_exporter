@@ -20,7 +20,7 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
   MAJOR_VERSION: 0
-  MiNOR_VERSION: 1
+  MINOR_VERSION: 1
 
 jobs:
   build-and-push:
