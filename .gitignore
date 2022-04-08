@@ -2,4 +2,5 @@
 *.DS_Store
 azure_metrics_exporter
 azure.yml
+azure2.yml
 notes.txt
