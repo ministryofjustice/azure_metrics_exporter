@@ -196,7 +196,7 @@ func NewAzureClient() *AzureClient {
 	}
 }
 
-func (ac *AzureClient) getAccessToken() error {
+func (ac *AzureClient) getAccessToken(sc *config.SafeConfig) error {
 	var resp *http.Response
 	var err error
 	if len(sc.C.Credentials.ClientID) == 0 {
@@ -247,10 +247,10 @@ func (ac *AzureClient) getAccessToken() error {
 }
 
 // Returns metric definitions for all configured target and resource groups
-func (ac *AzureClient) getMetricDefinitions() (map[string]AzureMetricDefinitionResponse, error) {
+func (ac *AzureClient) getMetricDefinitions(sc *config.SafeConfig) (map[string]AzureMetricDefinitionResponse, error) {
 	definitions := make(map[string]AzureMetricDefinitionResponse)
 	for _, target := range sc.C.Targets {
-		def, err := ac.getAzureMetricDefinitionResponse(target.Resource, target.MetricNamespace)
+		def, err := ac.getAzureMetricDefinitionResponse(target.Resource, target.MetricNamespace, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -262,13 +262,13 @@ func (ac *AzureClient) getMetricDefinitions() (map[string]AzureMetricDefinitionR
 	}
 
 	for _, resourceGroup := range sc.C.ResourceGroups {
-		resources, err := ac.filteredListFromResourceGroup(resourceGroup)
+		resources, err := ac.filteredListFromResourceGroup(resourceGroup, sc)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get resources for resource group %s and resource types %s: %v",
 				resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
 		}
 		for _, resource := range resources {
-			def, err := ac.getAzureMetricDefinitionResponse(resource.ID, resourceGroup.MetricNamespace)
+			def, err := ac.getAzureMetricDefinitionResponse(resource.ID, resourceGroup.MetricNamespace, sc)
 			if err != nil {
 				return nil, err
 			}
@@ -283,10 +283,10 @@ func (ac *AzureClient) getMetricDefinitions() (map[string]AzureMetricDefinitionR
 }
 
 // Returns metric namespaces for all configured target and resource groups.
-func (ac *AzureClient) getMetricNamespaces() (map[string]MetricNamespaceCollectionResponse, error) {
+func (ac *AzureClient) getMetricNamespaces(sc *config.SafeConfig) (map[string]MetricNamespaceCollectionResponse, error) {
 	namespaces := make(map[string]MetricNamespaceCollectionResponse)
 	for _, target := range sc.C.Targets {
-		namespaceCollection, err := ac.getMetricNamespaceCollectionResponse(target.Resource)
+		namespaceCollection, err := ac.getMetricNamespaceCollectionResponse(target.Resource, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -294,13 +294,13 @@ func (ac *AzureClient) getMetricNamespaces() (map[string]MetricNamespaceCollecti
 	}
 
 	for _, resourceGroup := range sc.C.ResourceGroups {
-		resources, err := ac.filteredListFromResourceGroup(resourceGroup)
+		resources, err := ac.filteredListFromResourceGroup(resourceGroup, sc)
 		if err != nil {
 			return nil, fmt.Errorf("Failed to get resources for resource group %s and resource types %s: %v",
 				resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
 		}
 		for _, resource := range resources {
-			namespaceCollection, err := ac.getMetricNamespaceCollectionResponse(resource.ID)
+			namespaceCollection, err := ac.getMetricNamespaceCollectionResponse(resource.ID, sc)
 			if err != nil {
 				return nil, err
 			}
@@ -311,7 +311,7 @@ func (ac *AzureClient) getMetricNamespaces() (map[string]MetricNamespaceCollecti
 }
 
 // Returns AzureMetricDefinitionResponse for a given resource
-func (ac *AzureClient) getAzureMetricDefinitionResponse(resource string, metricNamespace string) (*AzureMetricDefinitionResponse, error) {
+func (ac *AzureClient) getAzureMetricDefinitionResponse(resource string, metricNamespace string, sc *config.SafeConfig) (*AzureMetricDefinitionResponse, error) {
 	apiVersion := "2018-01-01"
 
 	metricsResource := fmt.Sprintf("subscriptions/%s%s", sc.C.Credentials.SubscriptionID, resource)
@@ -347,7 +347,7 @@ func (ac *AzureClient) getAzureMetricDefinitionResponse(resource string, metricN
 }
 
 // Returns MetricNamespaceCollectionResponse for a given resource
-func (ac *AzureClient) getMetricNamespaceCollectionResponse(resource string) (*MetricNamespaceCollectionResponse, error) {
+func (ac *AzureClient) getMetricNamespaceCollectionResponse(resource string, sc *config.SafeConfig) (*MetricNamespaceCollectionResponse, error) {
 	apiVersion := "2017-12-01-preview"
 
 	nsResource := fmt.Sprintf("subscriptions/%s%s", sc.C.Credentials.SubscriptionID, resource)
@@ -379,8 +379,8 @@ func (ac *AzureClient) getMetricNamespaceCollectionResponse(resource string) (*M
 }
 
 // Returns resource list resolved and filtered from resource_groups configuration
-func (ac *AzureClient) filteredListFromResourceGroup(resourceGroup config.ResourceGroup) ([]AzureResource, error) {
-	resources, err := ac.listFromResourceGroup(resourceGroup.ResourceGroup, resourceGroup.ResourceTypes)
+func (ac *AzureClient) filteredListFromResourceGroup(resourceGroup config.ResourceGroup, sc *config.SafeConfig) ([]AzureResource, error) {
+	resources, err := ac.listFromResourceGroup(resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, sc)
 	if err != nil {
 		return nil, err
 	}
@@ -390,8 +390,8 @@ func (ac *AzureClient) filteredListFromResourceGroup(resourceGroup config.Resour
 }
 
 // Returns resource list filtered by tag name and tag value
-func (ac *AzureClient) filteredListByTag(resourceTag config.ResourceTag, resourcesMap map[string][]byte) ([]AzureResource, error) {
-	resources, err := ac.listByTag(resourceTag.ResourceTagName, resourceTag.ResourceTagValue, resourceTag.ResourceTypes, resourcesMap)
+func (ac *AzureClient) filteredListByTag(resourceTag config.ResourceTag, resourcesMap map[string][]byte, sc *config.SafeConfig) ([]AzureResource, error) {
+	resources, err := ac.listByTag(resourceTag.ResourceTagName, resourceTag.ResourceTagValue, resourceTag.ResourceTypes, resourcesMap, sc)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +399,7 @@ func (ac *AzureClient) filteredListByTag(resourceTag config.ResourceTag, resourc
 }
 
 // Returns all resources for given resource group and types
-func (ac *AzureClient) listFromResourceGroup(resourceGroup string, resourceTypes []string) ([]AzureResource, error) {
+func (ac *AzureClient) listFromResourceGroup(resourceGroup string, resourceTypes []string, sc *config.SafeConfig) ([]AzureResource, error) {
 	apiVersion := "2018-02-01"
 
 	var filterTypesElements []string
@@ -410,7 +410,7 @@ func (ac *AzureClient) listFromResourceGroup(resourceGroup string, resourceTypes
 	subscription := fmt.Sprintf("subscriptions/%s", sc.C.Credentials.SubscriptionID)
 	resourcesEndpoint := fmt.Sprintf("%s/%s/resourceGroups/%s/resources?api-version=%s&$filter=%s", sc.C.ResourceManagerURL, subscription, resourceGroup, apiVersion, filterTypes)
 
-	body, err := getAzureMonitorResponse(resourcesEndpoint)
+	body, err := getAzureMonitorResponse(resourcesEndpoint, ac)
 	if err != nil {
 		return nil, err
 	}
@@ -420,11 +420,11 @@ func (ac *AzureClient) listFromResourceGroup(resourceGroup string, resourceTypes
 	if err != nil {
 		return nil, fmt.Errorf("Error unmarshalling response body: %v", err)
 	}
-	return data.extendResources(), nil
+	return data.extendResources(sc), nil
 }
 
 // Returns all resource with the given couple tagname, tagvalue
-func (ac *AzureClient) listByTag(tagName string, tagValue string, types []string, resourcesMap map[string][]byte) ([]AzureResource, error) {
+func (ac *AzureClient) listByTag(tagName string, tagValue string, types []string, resourcesMap map[string][]byte, sc *config.SafeConfig) ([]AzureResource, error) {
 	apiVersion := "2018-05-01"
 	securedTagName := secureString(tagName)
 	securedTagValue := secureString(tagValue)
@@ -435,7 +435,7 @@ func (ac *AzureClient) listByTag(tagName string, tagValue string, types []string
 	body, ok := resourcesMap[resourcesEndpoint]
 	if !ok {
 		var err error
-		body, err = getAzureMonitorResponse(resourcesEndpoint)
+		body, err = getAzureMonitorResponse(resourcesEndpoint, ac)
 		if err != nil {
 			return nil, err
 		}
@@ -451,17 +451,17 @@ func (ac *AzureClient) listByTag(tagName string, tagValue string, types []string
 	if len(types) > 0 {
 		data.Value = data.filterTypesInResourceList(types)
 	}
-	return data.extendResources(), nil
+	return data.extendResources(sc), nil
 }
 
-func (ac *AzureClient) listAPIVersions() error {
+func (ac *AzureClient) listAPIVersions(sc *config.SafeConfig) error {
 	apiVersion := "2021-04-01"
 	var versionResponse APIVersionResponse
 
 	subscription := fmt.Sprintf("subscriptions/%s", sc.C.Credentials.SubscriptionID)
 	resourcesEndpoint := fmt.Sprintf("%s/%s/providers?api-version=%s", sc.C.ResourceManagerURL, subscription, apiVersion)
 
-	body, err := getAzureMonitorResponse(resourcesEndpoint)
+	body, err := getAzureMonitorResponse(resourcesEndpoint, ac)
 	if err != nil {
 		return err
 	}
@@ -494,7 +494,7 @@ func secureString(value string) string {
 	return securedValue
 }
 
-func getAzureMonitorResponse(azureManagementEndpoint string) ([]byte, error) {
+func getAzureMonitorResponse(azureManagementEndpoint string, ac *AzureClient) ([]byte, error) {
 	req, err := http.NewRequest("GET", azureManagementEndpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("Error creating HTTP request: %v", err)
@@ -517,7 +517,7 @@ func getAzureMonitorResponse(azureManagementEndpoint string) ([]byte, error) {
 	return body, err
 }
 
-func (ar *AzureResourceListResponse) extendResources() []AzureResource {
+func (ar *AzureResourceListResponse) extendResources(sc *config.SafeConfig) []AzureResource {
 	subscription := fmt.Sprintf("subscriptions/%s", sc.C.Credentials.SubscriptionID)
 	var subscriptionPrefixLen = len(subscription) + 1
 
@@ -562,12 +562,12 @@ func (ac *AzureClient) filterResources(resources []AzureResource, resourceGroup 
 	return filteredResources
 }
 
-func (ac *AzureClient) refreshAccessToken() error {
+func (ac *AzureClient) refreshAccessToken(sc *config.SafeConfig) error {
 	now := time.Now().UTC()
 	refreshAt := ac.accessTokenExpiresOn.Add(-10 * time.Minute)
 
 	if now.After(refreshAt) {
-		err := ac.getAccessToken()
+		err := ac.getAccessToken(sc)
 		if err != nil {
 			return fmt.Errorf("Error refreshing access token: %v", err)
 		}
@@ -584,7 +584,7 @@ type batchRequest struct {
 	Method      string `json:"httpMethod"`
 }
 
-func resourceURLFrom(resource string, metricNamespace string, metricNames string, aggregations []string) string {
+func resourceURLFrom(resource string, metricNamespace string, metricNames string, aggregations []string, sc *config.SafeConfig) string {
 	apiVersion := "2018-01-01"
 
 	path := fmt.Sprintf(
@@ -614,7 +614,7 @@ func resourceURLFrom(resource string, metricNamespace string, metricNames string
 	return url.String()
 }
 
-func (ac *AzureClient) getBatchResponseBody(urls []string) ([]byte, error) {
+func (ac *AzureClient) getBatchResponseBody(urls []string, sc *config.SafeConfig) ([]byte, error) {
 
 	rmBaseURL := sc.C.ResourceManagerURL
 	if !strings.HasSuffix(sc.C.ResourceManagerURL, "/") {

@@ -1,3 +1,12 @@
+// I have made some very hasty modifications to the code so that it can take multiple configuration files and thus work across multiple subscriptions
+// It is worth bearing in mind that I had done this trying to do the minimum amount of work and that I'm still a massive newbie with go
+// Essentially the change is three fold:
+// 1. SafeConfig  and AzureClient are now Arrays
+// 2. We loop through config files
+//    a. In main to populate SafeConfig and AzureClient arrays
+//    b. In Collect we loop through the AzureClients
+// 3. Modify a bunch of functions so that they don't just use the global SafeConfig and AzureClient
+
 package main
 
 import (
@@ -19,11 +28,10 @@ import (
 )
 
 var (
-	sc = &config.SafeConfig{
-		C: &config.Config{},
-	}
-	ac                    = NewAzureClient()
-	configFile            = kingpin.Flag("config.file", "Azure exporter configuration file.").Default("azure.yml").String()
+	//why 42? why not? I know this is less than ideal but time constraints and all that.
+	sc                    [42]*config.SafeConfig
+	ac                    [42]*AzureClient
+	configFiles           = kingpin.Flag("config.file", "Azure exporter configuration file.").Default("azure.yml", "azure2.yml").Strings()
 	listenAddress         = kingpin.Flag("web.listen-address", "The address to listen on for HTTP requests.").Default(":9276").String()
 	listMetricDefinitions = kingpin.Flag("list.definitions", "List available metric definitions for the given resources and exit.").Bool()
 	listMetricNamespaces  = kingpin.Flag("list.namespaces", "List available metric namespaces for the given resources and exit.").Bool()
@@ -127,7 +135,7 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 	}
 }
 
-func (c *Collector) batchCollectMetrics(ch chan<- prometheus.Metric, resources []resourceMeta) {
+func (c *Collector) batchCollectMetrics(ch chan<- prometheus.Metric, resources []resourceMeta, ac *AzureClient, sc *config.SafeConfig) {
 	var publishedResources = map[string]bool{}
 
 	// collect metrics in batches
@@ -144,7 +152,7 @@ func (c *Collector) batchCollectMetrics(ch chan<- prometheus.Metric, resources [
 			urls = append(urls, r.resourceURL)
 		}
 
-		batchBody, err := ac.getBatchResponseBody(urls)
+		batchBody, err := ac.getBatchResponseBody(urls, sc)
 		if err != nil {
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 			return
@@ -163,7 +171,7 @@ func (c *Collector) batchCollectMetrics(ch chan<- prometheus.Metric, resources [
 	}
 }
 
-func (c *Collector) batchLookupResources(resources []resourceMeta) ([]resourceMeta, error) {
+func (c *Collector) batchLookupResources(resources []resourceMeta, ac *AzureClient, sc *config.SafeConfig) ([]resourceMeta, error) {
 	var updatedResources = resources
 	// collect resource info in batches
 	for i := 0; i < len(resources); i += batchSize {
@@ -192,7 +200,7 @@ func (c *Collector) batchLookupResources(resources []resourceMeta) ([]resourceMe
 			urls = append(urls, resourcesEndpoint)
 		}
 
-		batchBody, err := ac.getBatchResponseBody(urls)
+		batchBody, err := ac.getBatchResponseBody(urls, sc)
 		if err != nil {
 			return nil, err
 		}
@@ -213,94 +221,97 @@ func (c *Collector) batchLookupResources(resources []resourceMeta) ([]resourceMe
 
 // Collect - collect results from Azure Montior API and create Prometheus metrics.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
-	if err := ac.refreshAccessToken(); err != nil {
-		log.Println(err)
-		ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
-		return
-	}
-
-	var resources []resourceMeta
-	var incompleteResources []resourceMeta
-
-	for _, target := range sc.C.Targets {
-		var rm resourceMeta
-
-		metrics := []string{}
-		for _, metric := range target.Metrics {
-			metrics = append(metrics, metric.Name)
-		}
-
-		rm.resourceID = target.Resource
-		rm.metricNamespace = target.MetricNamespace
-		rm.metrics = strings.Join(metrics, ",")
-		rm.aggregations = filterAggregations(target.Aggregations)
-		rm.resourceURL = resourceURLFrom(target.Resource, rm.metricNamespace, rm.metrics, rm.aggregations)
-		incompleteResources = append(incompleteResources, rm)
-	}
-
-	for _, resourceGroup := range sc.C.ResourceGroups {
-		metrics := []string{}
-		for _, metric := range resourceGroup.Metrics {
-			metrics = append(metrics, metric.Name)
-		}
-		metricsStr := strings.Join(metrics, ",")
-
-		filteredResources, err := ac.filteredListFromResourceGroup(resourceGroup)
-		if err != nil {
-			log.Printf("Failed to get resources for resource group %s and resource types %s: %v",
-				resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
+	//This is 100% not a copy and paste from main, I swear
+	for i, _ := range *configFiles {
+		if err := ac[i].refreshAccessToken(sc[i]); err != nil {
+			log.Println(err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 			return
 		}
 
-		for _, f := range filteredResources {
+		var resources []resourceMeta
+		var incompleteResources []resourceMeta
+
+		for _, target := range sc[i].C.Targets {
 			var rm resourceMeta
-			rm.resourceID = f.ID
-			rm.metricNamespace = resourceGroup.MetricNamespace
-			rm.metrics = metricsStr
-			rm.aggregations = filterAggregations(resourceGroup.Aggregations)
-			rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations)
-			rm.resource = f
-			resources = append(resources, rm)
-		}
-	}
 
-	resourcesCache := make(map[string][]byte)
-	for _, resourceTag := range sc.C.ResourceTags {
-		metrics := []string{}
-		for _, metric := range resourceTag.Metrics {
-			metrics = append(metrics, metric.Name)
-		}
-		metricsStr := strings.Join(metrics, ",")
+			metrics := []string{}
+			for _, metric := range target.Metrics {
+				metrics = append(metrics, metric.Name)
+			}
 
-		filteredResources, err := ac.filteredListByTag(resourceTag, resourcesCache)
-		if err != nil {
-			log.Printf("Failed to get resources for tag name %s, tag value %s: %v",
-				resourceTag.ResourceTagName, resourceTag.ResourceTagValue, err)
-			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
-			return
-		}
-
-		for _, f := range filteredResources {
-			var rm resourceMeta
-			rm.resourceID = f.ID
-			rm.metricNamespace = resourceTag.MetricNamespace
-			rm.metrics = metricsStr
-			rm.aggregations = filterAggregations(resourceTag.Aggregations)
-			rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations)
+			rm.resourceID = target.Resource
+			rm.metricNamespace = target.MetricNamespace
+			rm.metrics = strings.Join(metrics, ",")
+			rm.aggregations = filterAggregations(target.Aggregations)
+			rm.resourceURL = resourceURLFrom(target.Resource, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
 			incompleteResources = append(incompleteResources, rm)
 		}
-	}
 
-	completeResources, err := c.batchLookupResources(incompleteResources)
-	if err != nil {
-		log.Printf("Failed to get resource info: %s", err)
-		ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
-		return
-	}
+		for _, resourceGroup := range sc[i].C.ResourceGroups {
+			metrics := []string{}
+			for _, metric := range resourceGroup.Metrics {
+				metrics = append(metrics, metric.Name)
+			}
+			metricsStr := strings.Join(metrics, ",")
 
-	resources = append(resources, completeResources...)
-	c.batchCollectMetrics(ch, resources)
+			filteredResources, err := ac[i].filteredListFromResourceGroup(resourceGroup, sc[i])
+			if err != nil {
+				log.Printf("Failed to get resources for resource group %s and resource types %s: %v",
+					resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
+				ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
+				return
+			}
+
+			for _, f := range filteredResources {
+				var rm resourceMeta
+				rm.resourceID = f.ID
+				rm.metricNamespace = resourceGroup.MetricNamespace
+				rm.metrics = metricsStr
+				rm.aggregations = filterAggregations(resourceGroup.Aggregations)
+				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
+				rm.resource = f
+				resources = append(resources, rm)
+			}
+		}
+
+		resourcesCache := make(map[string][]byte)
+		for _, resourceTag := range sc[i].C.ResourceTags {
+			metrics := []string{}
+			for _, metric := range resourceTag.Metrics {
+				metrics = append(metrics, metric.Name)
+			}
+			metricsStr := strings.Join(metrics, ",")
+
+			filteredResources, err := ac[i].filteredListByTag(resourceTag, resourcesCache, sc[i])
+			if err != nil {
+				log.Printf("Failed to get resources for tag name %s, tag value %s: %v",
+					resourceTag.ResourceTagName, resourceTag.ResourceTagValue, err)
+				ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
+				return
+			}
+
+			for _, f := range filteredResources {
+				var rm resourceMeta
+				rm.resourceID = f.ID
+				rm.metricNamespace = resourceTag.MetricNamespace
+				rm.metrics = metricsStr
+				rm.aggregations = filterAggregations(resourceTag.Aggregations)
+				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
+				incompleteResources = append(incompleteResources, rm)
+			}
+		}
+
+		completeResources, err := c.batchLookupResources(incompleteResources, ac[i], sc[i])
+		if err != nil {
+			log.Printf("Failed to get resource info: %s", err)
+			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
+			return
+		}
+
+		resources = append(resources, completeResources...)
+		c.batchCollectMetrics(ch, resources, ac[i], sc[i])
+	}
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -314,50 +325,58 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
-	if err := sc.ReloadConfig(*configFile); err != nil {
-		log.Fatalf("Error loading config: %v", err)
-	}
+	//I was wondering how difficult it would be to make this take several config files
+	for i, configFile := range *configFiles {
+		ac[i] = NewAzureClient()
+		sc[i] = &config.SafeConfig{
+			C: &config.Config{},
+		}
 
-	err := ac.getAccessToken()
-	if err != nil {
-		log.Fatalf("Failed to get token: %v", err)
-	}
+		if err := sc[i].ReloadConfig(configFile); err != nil {
+			log.Fatalf("Error loading config: %v", err)
+		}
 
-	// Print list of available metric definitions for each resource to console if specified.
-	if *listMetricDefinitions {
-		results, err := ac.getMetricDefinitions()
+		err := ac[i].getAccessToken(sc[i])
 		if err != nil {
-			log.Fatalf("Failed to fetch metric definitions: %v", err)
+			log.Fatalf("Failed to get token: %v", err)
 		}
 
-		for k, v := range results {
-			log.Printf("Resource: %s\n\nAvailable Metrics:\n", k)
-			for _, r := range v.MetricDefinitionResponses {
-				log.Printf("- %s\n", r.Name.Value)
+		// Print list of available metric definitions for each resource to console if specified.
+		if *listMetricDefinitions {
+			results, err := ac[i].getMetricDefinitions(sc[i])
+			if err != nil {
+				log.Fatalf("Failed to fetch metric definitions: %v", err)
 			}
-		}
-		os.Exit(0)
-	}
 
-	// Print list of available metric namespace for each resource to console if specified.
-	if *listMetricNamespaces {
-		results, err := ac.getMetricNamespaces()
+			for k, v := range results {
+				log.Printf("Resource: %s\n\nAvailable Metrics:\n", k)
+				for _, r := range v.MetricDefinitionResponses {
+					log.Printf("- %s\n", r.Name.Value)
+				}
+			}
+			os.Exit(0)
+		}
+
+		// Print list of available metric namespace for each resource to console if specified.
+		if *listMetricNamespaces {
+			results, err := ac[i].getMetricNamespaces(sc[i])
+			if err != nil {
+				log.Fatalf("Failed to fetch metric namespaces: %v", err)
+			}
+
+			for k, v := range results {
+				log.Printf("Resource: %s\n\nAvailable namespaces:\n", k)
+				for _, namespace := range v.MetricNamespaceCollection {
+					log.Printf("- %s\n", namespace.Properties.MetricNamespaceName)
+				}
+			}
+			os.Exit(0)
+		}
+
+		err = ac[i].listAPIVersions(sc[i])
 		if err != nil {
-			log.Fatalf("Failed to fetch metric namespaces: %v", err)
+			log.Fatal(err)
 		}
-
-		for k, v := range results {
-			log.Printf("Resource: %s\n\nAvailable namespaces:\n", k)
-			for _, namespace := range v.MetricNamespaceCollection {
-				log.Printf("- %s\n", namespace.Properties.MetricNamespaceName)
-			}
-		}
-		os.Exit(0)
-	}
-
-	err = ac.listAPIVersions()
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
