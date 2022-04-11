@@ -12,9 +12,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -28,10 +30,11 @@ import (
 )
 
 var (
-	//why 42? why not? I know this is less than ideal but time constraints and all that.
+	//why 42? why not? I know this is less than ideal but time constraints and all that or use append?
 	sc                    [42]*config.SafeConfig
 	ac                    [42]*AzureClient
-	configFiles           = kingpin.Flag("config.file", "Azure exporter configuration file.").Default("azure.yml", "azure2.yml").Strings()
+	configFiles           []string
+	configFilesDirectory  = kingpin.Flag("config.file-directory", "Azure exporter configuration file.").Default("./config").String()
 	listenAddress         = kingpin.Flag("web.listen-address", "The address to listen on for HTTP requests.").Default(":9276").String()
 	listMetricDefinitions = kingpin.Flag("list.definitions", "List available metric definitions for the given resources and exit.").Bool()
 	listMetricNamespaces  = kingpin.Flag("list.namespaces", "List available metric namespaces for the given resources and exit.").Bool()
@@ -222,7 +225,7 @@ func (c *Collector) batchLookupResources(resources []resourceMeta, ac *AzureClie
 // Collect - collect results from Azure Montior API and create Prometheus metrics.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	//This is 100% not a copy and paste from main, I swear
-	for i, _ := range *configFiles {
+	for i, _ := range configFiles {
 		if err := ac[i].refreshAccessToken(sc[i]); err != nil {
 			log.Println(err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
@@ -322,11 +325,27 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	h.ServeHTTP(w, r)
 }
 
+//This is used to find the config files
+func findFiles(root, ext string) []string {
+	var files []string
+	filepath.WalkDir(root, func(fileName string, dirEntry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if filepath.Ext(dirEntry.Name()) == ext {
+			files = append(files, fileName)
+		}
+		return nil
+	})
+	return files
+}
+
 func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
 	//I was wondering how difficult it would be to make this take several config files
-	for i, configFile := range *configFiles {
+	configFiles = findFiles(*configFilesDirectory, ".yml")
+	for i, configFile := range configFiles {
 		ac[i] = NewAzureClient()
 		sc[i] = &config.SafeConfig{
 			C: &config.Config{},
