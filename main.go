@@ -1,11 +1,12 @@
 // I have made some very hasty modifications to the code so that it can take multiple configuration files and thus work across multiple subscriptions
 // It is worth bearing in mind that I had done this trying to do the minimum amount of work and that I'm still a massive newbie with go
-// Essentially the change is three fold:
-// 1. SafeConfig  and AzureClient are now Arrays
-// 2. We loop through config files
-//    a. In main to populate SafeConfig and AzureClient arrays
-//    b. In Collect we loop through the AzureClients
-// 3. Modify a bunch of functions so that they don't just use the global SafeConfig and AzureClient
+// Essentially there are four changes:
+// 1. We now have config.file-directory to allow multiple config files to be specified easily, there is a story.
+// 2. We have a map that maps config file names to a struct (prometheusConfig) that contains SafeConfig and AzureClient.
+// 3. We loop through config files
+//    a. In main to populate the map
+//    b. In Collect, to well collect the data from the Azure API
+// 4. Modified a bunch of functions so that they don't just use the global SafeConfig and AzureClient
 
 package main
 
@@ -30,9 +31,6 @@ import (
 )
 
 var (
-	//why 42? why not? I know this is less than ideal but time constraints and all that or use append?
-	sc                    [42]*config.SafeConfig
-	ac                    [42]*AzureClient
 	configFiles           []string
 	configFilesDirectory  = kingpin.Flag("config.file-directory", "Azure exporter configuration file.").Default("./config").String()
 	listenAddress         = kingpin.Flag("web.listen-address", "The address to listen on for HTTP requests.").Default(":9276").String()
@@ -41,6 +39,7 @@ var (
 	invalidMetricChars    = regexp.MustCompile("[^a-zA-Z0-9_:]")
 	azureErrorDesc        = prometheus.NewDesc("azure_error", "Error collecting metrics", nil, nil)
 	batchSize             = 20
+	scrapingConfig        = make(map[string]scrapeConfig)
 )
 
 func init() {
@@ -55,6 +54,10 @@ func (c *Collector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- prometheus.NewDesc("dummy", "dummy", nil, nil)
 }
 
+type scrapeConfig struct {
+	sc *config.SafeConfig
+	ac *AzureClient
+}
 type resourceMeta struct {
 	resourceID      string
 	resourceURL     string
@@ -225,8 +228,8 @@ func (c *Collector) batchLookupResources(resources []resourceMeta, ac *AzureClie
 // Collect - collect results from Azure Montior API and create Prometheus metrics.
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	//This is 100% not a copy and paste from main, I swear
-	for i, _ := range configFiles {
-		if err := ac[i].refreshAccessToken(sc[i]); err != nil {
+	for _, configFile := range configFiles {
+		if err := scrapingConfig[configFile].ac.refreshAccessToken(scrapingConfig[configFile].sc); err != nil {
 			log.Println(err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 			return
@@ -235,7 +238,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		var resources []resourceMeta
 		var incompleteResources []resourceMeta
 
-		for _, target := range sc[i].C.Targets {
+		for _, target := range scrapingConfig[configFile].sc.C.Targets {
 			var rm resourceMeta
 
 			metrics := []string{}
@@ -247,18 +250,18 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 			rm.metricNamespace = target.MetricNamespace
 			rm.metrics = strings.Join(metrics, ",")
 			rm.aggregations = filterAggregations(target.Aggregations)
-			rm.resourceURL = resourceURLFrom(target.Resource, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
+			rm.resourceURL = resourceURLFrom(target.Resource, rm.metricNamespace, rm.metrics, rm.aggregations, scrapingConfig[configFile].sc)
 			incompleteResources = append(incompleteResources, rm)
 		}
 
-		for _, resourceGroup := range sc[i].C.ResourceGroups {
+		for _, resourceGroup := range scrapingConfig[configFile].sc.C.ResourceGroups {
 			metrics := []string{}
 			for _, metric := range resourceGroup.Metrics {
 				metrics = append(metrics, metric.Name)
 			}
 			metricsStr := strings.Join(metrics, ",")
 
-			filteredResources, err := ac[i].filteredListFromResourceGroup(resourceGroup, sc[i])
+			filteredResources, err := scrapingConfig[configFile].ac.filteredListFromResourceGroup(resourceGroup, scrapingConfig[configFile].sc)
 			if err != nil {
 				log.Printf("Failed to get resources for resource group %s and resource types %s: %v",
 					resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
@@ -272,21 +275,21 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 				rm.metricNamespace = resourceGroup.MetricNamespace
 				rm.metrics = metricsStr
 				rm.aggregations = filterAggregations(resourceGroup.Aggregations)
-				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
+				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, scrapingConfig[configFile].sc)
 				rm.resource = f
 				resources = append(resources, rm)
 			}
 		}
 
 		resourcesCache := make(map[string][]byte)
-		for _, resourceTag := range sc[i].C.ResourceTags {
+		for _, resourceTag := range scrapingConfig[configFile].sc.C.ResourceTags {
 			metrics := []string{}
 			for _, metric := range resourceTag.Metrics {
 				metrics = append(metrics, metric.Name)
 			}
 			metricsStr := strings.Join(metrics, ",")
 
-			filteredResources, err := ac[i].filteredListByTag(resourceTag, resourcesCache, sc[i])
+			filteredResources, err := scrapingConfig[configFile].ac.filteredListByTag(resourceTag, resourcesCache, scrapingConfig[configFile].sc)
 			if err != nil {
 				log.Printf("Failed to get resources for tag name %s, tag value %s: %v",
 					resourceTag.ResourceTagName, resourceTag.ResourceTagValue, err)
@@ -300,12 +303,12 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 				rm.metricNamespace = resourceTag.MetricNamespace
 				rm.metrics = metricsStr
 				rm.aggregations = filterAggregations(resourceTag.Aggregations)
-				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, sc[i])
+				rm.resourceURL = resourceURLFrom(f.ID, rm.metricNamespace, rm.metrics, rm.aggregations, scrapingConfig[configFile].sc)
 				incompleteResources = append(incompleteResources, rm)
 			}
 		}
 
-		completeResources, err := c.batchLookupResources(incompleteResources, ac[i], sc[i])
+		completeResources, err := c.batchLookupResources(incompleteResources, scrapingConfig[configFile].ac, scrapingConfig[configFile].sc)
 		if err != nil {
 			log.Printf("Failed to get resource info: %s", err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
@@ -313,7 +316,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 		}
 
 		resources = append(resources, completeResources...)
-		c.batchCollectMetrics(ch, resources, ac[i], sc[i])
+		c.batchCollectMetrics(ch, resources, scrapingConfig[configFile].ac, scrapingConfig[configFile].sc)
 	}
 }
 
@@ -345,24 +348,24 @@ func main() {
 	kingpin.Parse()
 	//I was wondering how difficult it would be to make this take several config files
 	configFiles = findFiles(*configFilesDirectory, ".yml")
-	for i, configFile := range configFiles {
-		ac[i] = NewAzureClient()
-		sc[i] = &config.SafeConfig{
-			C: &config.Config{},
-		}
+	for _, configFile := range configFiles {
+		scrapingConfig[configFile] = scrapeConfig{ac: NewAzureClient(),
+			sc: &config.SafeConfig{
+				C: &config.Config{},
+			}}
 
-		if err := sc[i].ReloadConfig(configFile); err != nil {
+		if err := scrapingConfig[configFile].sc.ReloadConfig(configFile); err != nil {
 			log.Fatalf("Error loading config: %v", err)
 		}
 
-		err := ac[i].getAccessToken(sc[i])
+		err := scrapingConfig[configFile].ac.getAccessToken(scrapingConfig[configFile].sc)
 		if err != nil {
 			log.Fatalf("Failed to get token: %v", err)
 		}
 
 		// Print list of available metric definitions for each resource to console if specified.
 		if *listMetricDefinitions {
-			results, err := ac[i].getMetricDefinitions(sc[i])
+			results, err := scrapingConfig[configFile].ac.getMetricDefinitions(scrapingConfig[configFile].sc)
 			if err != nil {
 				log.Fatalf("Failed to fetch metric definitions: %v", err)
 			}
@@ -378,7 +381,7 @@ func main() {
 
 		// Print list of available metric namespace for each resource to console if specified.
 		if *listMetricNamespaces {
-			results, err := ac[i].getMetricNamespaces(sc[i])
+			results, err := scrapingConfig[configFile].ac.getMetricNamespaces(scrapingConfig[configFile].sc)
 			if err != nil {
 				log.Fatalf("Failed to fetch metric namespaces: %v", err)
 			}
@@ -392,7 +395,7 @@ func main() {
 			os.Exit(0)
 		}
 
-		err = ac[i].listAPIVersions(sc[i])
+		err = scrapingConfig[configFile].ac.listAPIVersions(scrapingConfig[configFile].sc)
 		if err != nil {
 			log.Fatal(err)
 		}

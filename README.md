@@ -21,7 +21,9 @@ Note that Azure imposes an [API read limit of 15,000 requests per hour](https://
 
 ## Exporter configuration
 
-This exporter requires a configuration file. By default, it will look for the azure.yml file in the CWD.
+The exporter will by default look at a /config directory for config files.
+
+Only .yml files will be loaded as configuration files.
 
 ### Azure account requirements
 
