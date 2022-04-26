@@ -200,7 +200,7 @@ func (ac *AzureClient) getAccessToken(sc *config.SafeConfig) error {
 	var resp *http.Response
 	var err error
 	if len(sc.C.Credentials.ClientID) == 0 {
-		log.Printf("Using managed identity")
+		log.Printf("[WARN] Using managed identity")
 		target := fmt.Sprintf("http://169.254.169.254/metadata/identity/oauth2/token?resource=%s&api-version=2018-02-01", sc.C.ResourceManagerURL)
 		req, err := http.NewRequest("GET", target, nil)
 		if err != nil {

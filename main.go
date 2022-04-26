@@ -14,12 +14,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
+
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"log"
+
+	"github.com/hashicorp/logutils"
 
 	"github.com/RobustPerception/azure_metrics_exporter/config"
 
@@ -36,6 +40,7 @@ var (
 	listenAddress         = kingpin.Flag("web.listen-address", "The address to listen on for HTTP requests.").Default(":9276").String()
 	listMetricDefinitions = kingpin.Flag("list.definitions", "List available metric definitions for the given resources and exit.").Bool()
 	listMetricNamespaces  = kingpin.Flag("list.namespaces", "List available metric namespaces for the given resources and exit.").Bool()
+	logLevel              = kingpin.Flag("loglevel", "Log Level.").Default("WARN").String()
 	invalidMetricChars    = regexp.MustCompile("[^a-zA-Z0-9_:]")
 	azureErrorDesc        = prometheus.NewDesc("azure_error", "Error collecting metrics", nil, nil)
 	batchSize             = 20
@@ -68,20 +73,27 @@ type resourceMeta struct {
 }
 
 func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta, httpStatusCode int, metricValueData AzureMetricValueResponse, publishedResources map[string]bool) {
+
+	// The Azure Monitor API seems to sometimes return the same metric multiple times, I guess depending on the sliding window, thus we store whether it's been published already.
+	// This does mean that we WILL lose metrics if the same metric is published multiple times, but that's better than the alternative, which means losing all metrics on that processing run.
+	// After some investigation I'm not 100% that we will lose metrics, guess we need to test properly
+	processedMetrics := make(map[string]bool)
+
 	if httpStatusCode != 200 {
-		log.Printf("Received %d status for resource %s. %s", httpStatusCode, rm.resourceURL, metricValueData.APIError.Message)
+		log.Printf("[WARN] Received %d status for resource %s. %s", httpStatusCode, rm.resourceURL, metricValueData.APIError.Message)
 		return
 	}
 
 	if len(metricValueData.Value) == 0 || len(metricValueData.Value[0].Timeseries) == 0 {
-		log.Printf("Metric %v not found at target %v\n", rm.metrics, rm.resourceURL)
+		log.Printf("[WARN] Metric %v not found at target %v\n", rm.metrics, rm.resourceURL)
 		return
 	}
 	if len(metricValueData.Value[0].Timeseries[0].Data) == 0 {
-		log.Printf("No metric data returned for metric %v at target %v\n", rm.metrics, rm.resourceURL)
+		log.Printf("[WARN] No metric data returned for metric %v at target %v\n", rm.metrics, rm.resourceURL)
 		return
 	}
 
+	log.Print("[DEBUG] -------------- Start Extracting Metrics --------------\n")
 	for _, value := range metricValueData.Value {
 		// Ensure Azure metric names conform to Prometheus metric name conventions
 		metricName := strings.Replace(value.Name.Value, " ", "_", -1)
@@ -91,12 +103,14 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 			metricName = strings.ToLower(rm.metricNamespace + "_" + metricName)
 		}
 		metricName = invalidMetricChars.ReplaceAllString(metricName, "_")
+		log.Printf("[DEBUG] Processing %s\n", metricName)
 
-		if len(value.Timeseries) > 0 {
+		if len(value.Timeseries) > 0 && !processedMetrics[rm.resource.ID+metricName] {
 			metricValue := value.Timeseries[0].Data[len(value.Timeseries[0].Data)-1]
 			labels := CreateResourceLabels(rm.resourceURL)
 
 			if hasAggregation(rm.aggregations, "Total") {
+				log.Printf("[DEBUG] Total %f\n", metricValue.Total)
 				ch <- prometheus.MustNewConstMetric(
 					prometheus.NewDesc(metricName+"_total", metricName+"_total", nil, labels),
 					prometheus.GaugeValue,
@@ -105,6 +119,7 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 			}
 
 			if hasAggregation(rm.aggregations, "Average") {
+				log.Printf("[DEBUG] Total %f\n", metricValue.Average)
 				ch <- prometheus.MustNewConstMetric(
 					prometheus.NewDesc(metricName+"_average", metricName+"_average", nil, labels),
 					prometheus.GaugeValue,
@@ -113,6 +128,7 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 			}
 
 			if hasAggregation(rm.aggregations, "Minimum") {
+				log.Printf("[DEBUG] Total %f\n", metricValue.Minimum)
 				ch <- prometheus.MustNewConstMetric(
 					prometheus.NewDesc(metricName+"_min", metricName+"_min", nil, labels),
 					prometheus.GaugeValue,
@@ -121,14 +137,21 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 			}
 
 			if hasAggregation(rm.aggregations, "Maximum") {
+				log.Printf("[DEBUG] Total %f\n", metricValue.Maximum)
 				ch <- prometheus.MustNewConstMetric(
 					prometheus.NewDesc(metricName+"_max", metricName+"_max", nil, labels),
 					prometheus.GaugeValue,
 					metricValue.Maximum,
 				)
 			}
+		} else if len(value.Timeseries) > 0 && processedMetrics[rm.resource.ID+metricName] {
+			metricValue := value.Timeseries[0].Data[len(value.Timeseries[0].Data)-1]
+			log.Printf("[WARN] Skipping metric %s to avoid duplicate metrics. TimeStamp: %s Total: %f Average: %f Min: %f Max: %f.\n", metricName, metricValue.TimeStamp, metricValue.Total, metricValue.Average, metricValue.Minimum, metricValue.Maximum)
 		}
+		processedMetrics[rm.resource.ID+metricName] = true
 	}
+
+	log.Print("[DEBUG] -------------- End Extracting Metrics--------------\n")
 
 	if _, ok := publishedResources[rm.resource.ID]; !ok {
 		infoLabels := CreateAllResourceLabelsFrom(rm)
@@ -137,6 +160,7 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 			prometheus.GaugeValue,
 			1,
 		)
+		log.Printf("[DEBUG] Published: %s\n", rm.resource.ID)
 		publishedResources[rm.resource.ID] = true
 	}
 }
@@ -263,7 +287,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 			filteredResources, err := scrapingConfig[configFile].ac.filteredListFromResourceGroup(resourceGroup, scrapingConfig[configFile].sc)
 			if err != nil {
-				log.Printf("Failed to get resources for resource group %s and resource types %s: %v",
+				log.Printf("[ERROR] Failed to get resources for resource group %s and resource types %s: %v",
 					resourceGroup.ResourceGroup, resourceGroup.ResourceTypes, err)
 				ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 				return
@@ -291,7 +315,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 			filteredResources, err := scrapingConfig[configFile].ac.filteredListByTag(resourceTag, resourcesCache, scrapingConfig[configFile].sc)
 			if err != nil {
-				log.Printf("Failed to get resources for tag name %s, tag value %s: %v",
+				log.Printf("[ERROR] Failed to get resources for tag name %s, tag value %s: %v",
 					resourceTag.ResourceTagName, resourceTag.ResourceTagValue, err)
 				ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 				return
@@ -310,7 +334,7 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 		completeResources, err := c.batchLookupResources(incompleteResources, scrapingConfig[configFile].ac, scrapingConfig[configFile].sc)
 		if err != nil {
-			log.Printf("Failed to get resource info: %s", err)
+			log.Printf("[ERROR] Failed to get resource info: %s", err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
 			return
 		}
@@ -346,6 +370,14 @@ func findFiles(root, ext string) []string {
 func main() {
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
+
+	filter := &logutils.LevelFilter{
+		Levels:   []logutils.LogLevel{"DEBUG", "WARN", "ERROR"},
+		MinLevel: logutils.LogLevel(*logLevel),
+		Writer:   os.Stderr,
+	}
+	log.SetOutput(filter)
+
 	//I was wondering how difficult it would be to make this take several config files
 	configFiles = findFiles(*configFilesDirectory, ".yml")
 	for _, configFile := range configFiles {
