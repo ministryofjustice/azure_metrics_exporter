@@ -500,13 +500,16 @@ func getAzureMonitorResponse(azureManagementEndpoint string, ac *AzureClient) ([
 		return nil, fmt.Errorf("Error creating HTTP request: %v", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+ac.accessToken)
+	start := time.Now()
+	log.Printf("[WARN] Sending Azure Monitor request to %s", req.URL)
 	resp, err := ac.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("Error: %v", err)
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
-
+	duration := time.Since(start)
+	log.Printf("[WARN] Duration: %s. %s request ended. ", duration, req.URL)
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("Unable to query API with status code: %d and with body: %s", resp.StatusCode, body)
 	}
