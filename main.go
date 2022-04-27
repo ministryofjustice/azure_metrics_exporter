@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"net/http"
 	"os"
@@ -40,7 +41,7 @@ var (
 	listenAddress         = kingpin.Flag("web.listen-address", "The address to listen on for HTTP requests.").Default(":9276").String()
 	listMetricDefinitions = kingpin.Flag("list.definitions", "List available metric definitions for the given resources and exit.").Bool()
 	listMetricNamespaces  = kingpin.Flag("list.namespaces", "List available metric namespaces for the given resources and exit.").Bool()
-	logLevel              = kingpin.Flag("loglevel", "Log Level.").Default("WARN").String()
+	logLevel              = kingpin.Flag("loglevel", "Log Level.").Default("DEBUG").String()
 	invalidMetricChars    = regexp.MustCompile("[^a-zA-Z0-9_:]")
 	azureErrorDesc        = prometheus.NewDesc("azure_error", "Error collecting metrics", nil, nil)
 	batchSize             = 20
@@ -167,7 +168,6 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 
 func (c *Collector) batchCollectMetrics(ch chan<- prometheus.Metric, resources []resourceMeta, ac *AzureClient, sc *config.SafeConfig) {
 	var publishedResources = map[string]bool{}
-
 	// collect metrics in batches
 	for i := 0; i < len(resources); i += batchSize {
 		j := i + batchSize
@@ -206,7 +206,6 @@ func (c *Collector) batchLookupResources(resources []resourceMeta, ac *AzureClie
 	// collect resource info in batches
 	for i := 0; i < len(resources); i += batchSize {
 		j := i + batchSize
-
 		// don't forget to add remainder resources
 		if j > len(resources) {
 			j = len(resources)
@@ -253,6 +252,7 @@ func (c *Collector) batchLookupResources(resources []resourceMeta, ac *AzureClie
 func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 	//This is 100% not a copy and paste from main, I swear
 	for _, configFile := range configFiles {
+		start := time.Now()
 		if err := scrapingConfig[configFile].ac.refreshAccessToken(scrapingConfig[configFile].sc); err != nil {
 			log.Println(err)
 			ch <- prometheus.NewInvalidMetric(azureErrorDesc, err)
@@ -341,6 +341,8 @@ func (c *Collector) Collect(ch chan<- prometheus.Metric) {
 
 		resources = append(resources, completeResources...)
 		c.batchCollectMetrics(ch, resources, scrapingConfig[configFile].ac, scrapingConfig[configFile].sc)
+		duration := time.Since(start)
+		log.Printf("[DEBUG] Processed %s in %s. ", configFile, duration)
 	}
 }
 

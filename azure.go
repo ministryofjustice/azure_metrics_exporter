@@ -501,7 +501,7 @@ func getAzureMonitorResponse(azureManagementEndpoint string, ac *AzureClient) ([
 	}
 	req.Header.Set("Authorization", "Bearer "+ac.accessToken)
 	start := time.Now()
-	log.Printf("[WARN] Sending Azure Monitor request to %s", req.URL)
+	log.Printf("[DEBUG] Sending Azure Monitor request to %s", req.URL)
 	resp, err := ac.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("Error: %v", err)
@@ -509,7 +509,7 @@ func getAzureMonitorResponse(azureManagementEndpoint string, ac *AzureClient) ([
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	duration := time.Since(start)
-	log.Printf("[WARN] Duration: %s. %s request ended. ", duration, req.URL)
+	log.Printf("[DEBUG] Duration: %s. %s request ended. ", duration, req.URL)
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("Unable to query API with status code: %d and with body: %s", resp.StatusCode, body)
 	}
@@ -618,7 +618,7 @@ func resourceURLFrom(resource string, metricNamespace string, metricNames string
 }
 
 func (ac *AzureClient) getBatchResponseBody(urls []string, sc *config.SafeConfig) ([]byte, error) {
-
+	start := time.Now()
 	rmBaseURL := sc.C.ResourceManagerURL
 	if !strings.HasSuffix(sc.C.ResourceManagerURL, "/") {
 		rmBaseURL += "/"
@@ -656,5 +656,8 @@ func (ac *AzureClient) getBatchResponseBody(urls []string, sc *config.SafeConfig
 	if err != nil {
 		return nil, err
 	}
+
+	duration := time.Since(start)
+	log.Printf("[DEBUG] getBatchResponseBody Duration: %s.", duration)
 	return body, nil
 }
