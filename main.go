@@ -54,6 +54,12 @@ type resourceMeta struct {
 }
 
 func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta, httpStatusCode int, metricValueData AzureMetricValueResponse, publishedResources map[string]bool) {
+
+	// The Azure Monitor API seems to sometimes return the same metric multiple times, I guess depending on the sliding window, thus we store whether it's been published already.
+	// This does mean that we WILL lose metrics if the same metric is published multiple times, but that's better than the alternative, which means losing all metrics on that processing run.
+	// After some investigation I'm not 100% that we will lose metrics, guess we need to test properly
+	processedMetrics := make(map[string]bool)
+
 	if httpStatusCode != 200 {
 		log.Printf("Received %d status for resource %s. %s", httpStatusCode, rm.resourceURL, metricValueData.APIError.Message)
 		return
@@ -78,7 +84,7 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 		}
 		metricName = invalidMetricChars.ReplaceAllString(metricName, "_")
 
-		if len(value.Timeseries) > 0 {
+		if len(value.Timeseries) > 0 && !processedMetrics[rm.resource.ID+metricName] {
 			metricValue := value.Timeseries[0].Data[len(value.Timeseries[0].Data)-1]
 			labels := CreateResourceLabels(rm.resourceURL)
 
@@ -113,7 +119,11 @@ func (c *Collector) extractMetrics(ch chan<- prometheus.Metric, rm resourceMeta,
 					metricValue.Maximum,
 				)
 			}
+		} else if len(value.Timeseries) > 0 && processedMetrics[rm.resource.ID+metricName] {
+			metricValue := value.Timeseries[0].Data[len(value.Timeseries[0].Data)-1]
+			log.Printf("Skipping metric %s to avoid duplicate metrics. TimeStamp: %s Total: %f Average: %f Min: %f Max: %f.\n", metricName, metricValue.TimeStamp, metricValue.Total, metricValue.Average, metricValue.Minimum, metricValue.Maximum)
 		}
+		processedMetrics[rm.resource.ID+metricName] = true
 	}
 
 	if _, ok := publishedResources[rm.resource.ID]; !ok {
